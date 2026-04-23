@@ -1,0 +1,15 @@
+# Local .terraform directories
+**/.terraform/*
+.terraform.lock.hcl
+
+# .tfstate files
+*.tfstate
+*.tfstate.*
+.idea/
+terraform.exe
+
+gha-creds*.json
+
+tf_validate_*
+
+modules/README.md

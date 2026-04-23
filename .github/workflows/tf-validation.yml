@@ -1,0 +1,63 @@
+name: 'Terraform Validation'
+
+on:
+  push:
+  pull_request:
+
+
+permissions:
+  contents: write
+  actions: read
+  pages: write
+  id-token: write
+  security-events: write
+  pull-requests: write
+
+jobs:
+  terraform-validations:
+    name: 'Terraform Validations'
+    runs-on: ubuntu-latest
+    # Use the Bash shell regardless whether the GitHub Actions runner is ubuntu-latest, macos-latest, or windows-latest
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+    # Checkout the repository to the GitHub Actions runner
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    # Install the latest version of Terraform CLI and configure the Terraform CLI configuration file with a Terraform Cloud user API token
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        cli_config_credentials_token: ${{ secrets.TF_API_TOKEN }}
+
+    # Run Terraform FMT
+    - name: Terraform FMT
+      run: |
+        terraform fmt -check=true -write=false -diff=true -list=true -recursive
+
+    # Run Terraform Validator
+    - name: Terraform Validation
+      run: .github/src/terraform-validator.sh
+
+  # Updates tf-doc section of readme 
+  docs:
+    name: "Update README"
+    runs-on: ubuntu-latest
+    needs: [terraform-validations]
+    if: github.event_name == 'pull_request'
+    
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        ref: ${{ github.event.pull_request.head.ref }} 
+
+    - name: Terraform Docs
+      uses: terraform-docs/gh-actions@v1.1.0
+      with:
+        working-dir: ./modules
+        output-method: inject
+        git-push: "true" 
+        config-file: .github/src/tf-docs.yml
