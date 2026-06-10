@@ -38,6 +38,14 @@ Action group sending email alerts to a configurable security address
 `id` - Resource ID of the storage account
 
 
+## Module scope — what callers must provision themselves
+
+This module provisions the storage account and surrounding infrastructure but **not the file shares**:
+
+- Create `azurerm_storage_share` resources in your calling configuration (share names are caller-specific).
+- To back up those shares, also create `azurerm_backup_protected_file_share` in the calling configuration, referencing the vault and policy this module creates (`enable_backup = true`).
+- `private_dns_zone_id` is **required in practice** — the module fails at plan time if it is null, because without DNS zone registration SMB clients cannot resolve the storage account and mounts fail silently.
+
 ## Compatibility
 Any compatability concerns go here
 
@@ -105,8 +113,12 @@ shared_access_key_enabled = false
 # AD share-level permission (ISO 27001 A.8.2 — principle of least privilege)
 default_share_level_permission = "StorageFileDataSmbShareElevatedContributor"
 
-# Log Analytics retention (ISO 27001 A.8.15 recommends >= 365 days for audit logs)
-log_analytics_retention_days = 90
+# Log Analytics retention (ISO 27001 A.8.15 — 365-day default for audit log compliance)
+log_analytics_retention_days = 365
+
+# Storage account replication. Use LRS in regions without availability zones,
+# GRS for geo-redundancy independent of the backup vault.
+storage_account_replication_type = "ZRS"  # Options: LRS, ZRS, GRS
 
 # Recovery Services Vault settings
 backup_vault_storage_mode_type = "ZoneRedundant"  # Options: LocallyRedundant, ZoneRedundant, GeoRedundant
@@ -121,6 +133,19 @@ backup_vault_cross_region_restore_enabled = false
 
 # Defender for Storage — malware scan monthly cap in GB (0 = unlimited)
 malware_scanning_cap_gb_per_month = 5000
+
+# ⚠ The subscription-level Defender for Storage plan is a SUBSCRIPTION-SCOPED SINGLETON.
+# Set to false if Defender for Storage is already enabled by another Terraform
+# configuration, another instance of this module in the same subscription, or Azure
+# Policy — otherwise the deployments will conflict over the same resource.
+enable_defender_subscription_pricing = true
+
+# Keep true so this module's malware scanning / data discovery settings apply
+# regardless of the subscription-level Defender policy (ISO 27001 A.8.12).
+defender_override_subscription_settings_enabled = true
+
+# Backup schedule timezone (Windows timezone names, e.g. "Romance Standard Time")
+backup_timezone = "UTC"
 
 # Alert thresholds — tune per environment to avoid alert fatigue (ISO 27001 A.8.16)
 alert_threshold_high_errors    = 100

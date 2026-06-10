@@ -18,8 +18,8 @@ resource "azurerm_storage_account" "default" {
   local_user_enabled               = false
   allow_nested_items_to_be_public  = false
   network_rules {
-    default_action = "Deny"
-    bypass         = ["AzureServices", "Logging", "Metrics"]
+    default_action             = "Deny"
+    bypass                     = ["AzureServices", "Logging", "Metrics"]
     virtual_network_subnet_ids = var.storage_account_subnet_ids
     ip_rules                   = var.ip_rules
   }
@@ -66,6 +66,10 @@ resource "azurerm_storage_account" "default" {
       # share_properties[0].smb[0].channel_encryption_type,
     ]
   }
+}
+
+data "azurerm_resource_group" "current" {
+  name = var.az_files_storage_account_rg_name
 }
 
 resource "azurerm_private_endpoint" "default_storage_pe" {
@@ -129,7 +133,8 @@ resource "azurerm_recovery_services_vault" "backup_vault" {
   storage_mode_type             = var.backup_vault_storage_mode_type
   public_network_access_enabled = var.backup_vault_public_network_access_enabled
   cross_region_restore_enabled  = var.backup_vault_cross_region_restore_enabled
-  soft_delete_enabled           = true
+  # soft delete is always on per Azure's secure-by-default policy;
+  # the soft_delete_enabled argument is deprecated and removed in azurerm v5
 
   tags = var.tags
 
@@ -189,13 +194,11 @@ resource "azurerm_monitor_diagnostic_setting" "storage_account" {
   name                       = "${var.az_files_storage_account_name}-diagnostics"
   target_resource_id         = azurerm_storage_account.default.id
   log_analytics_workspace_id = azurerm_log_analytics_workspace.storage_logs.id
-  metric {
+  enabled_metric {
     category = "Transaction"
-    enabled  = true
   }
-  metric {
+  enabled_metric {
     category = "Capacity"
-    enabled  = true
   }
 }
 
@@ -213,9 +216,8 @@ resource "azurerm_monitor_diagnostic_setting" "file_service" {
   enabled_log {
     category = "StorageDelete"
   }
-  metric {
+  enabled_metric {
     category = "Transaction"
-    enabled  = true
   }
 }
 
@@ -372,6 +374,7 @@ resource "azurerm_monitor_metric_alert" "auth_failures" {
 resource "azurerm_monitor_activity_log_alert" "delete_storage_account" {
   name                = "${var.az_files_storage_account_name}-delete-sa-alert"
   resource_group_name = var.az_files_storage_account_rg_name
+  location            = "global"
   scopes              = [azurerm_storage_account.default.id]
   description         = "Alert when the storage account is deleted — critical security event"
 
@@ -389,14 +392,16 @@ resource "azurerm_monitor_activity_log_alert" "delete_storage_account" {
 }
 
 # Activity log alert — private endpoint deleted (ISO 27001 A.8.16)
+# Scoped to the resource group, not the PE itself, so the alert rule survives
+# the deletion it is meant to detect and catches any PE deletion in the RG.
 resource "azurerm_monitor_activity_log_alert" "delete_private_endpoint" {
   name                = "${var.az_files_storage_account_name}-delete-pe-alert"
   resource_group_name = var.az_files_storage_account_rg_name
-  scopes              = [azurerm_private_endpoint.default_storage_pe.id]
-  description         = "Alert when the storage private endpoint is deleted — network security event"
+  location            = "global"
+  scopes              = [data.azurerm_resource_group.current.id]
+  description         = "Alert when a private endpoint in the resource group is deleted — network security event"
 
   criteria {
-    resource_id    = azurerm_private_endpoint.default_storage_pe.id
     operation_name = "Microsoft.Network/privateEndpoints/delete"
     category       = "Administrative"
   }
@@ -412,6 +417,7 @@ resource "azurerm_monitor_activity_log_alert" "delete_private_endpoint" {
 resource "azurerm_monitor_activity_log_alert" "regenerate_storage_key" {
   name                = "${var.az_files_storage_account_name}-key-regen-alert"
   resource_group_name = var.az_files_storage_account_rg_name
+  location            = "global"
   scopes              = [azurerm_storage_account.default.id]
   description         = "Alert when storage account access keys are regenerated — potential credential compromise"
 
