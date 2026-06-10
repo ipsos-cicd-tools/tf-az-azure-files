@@ -157,3 +157,51 @@ variable "ip_rules" {
   type        = list(string)
   default     = []
 }
+
+variable "storage_account_subnet_ids" {
+  description = "List of subnet IDs allowed to access the storage account via VNet service endpoints. Used alongside the private endpoint."
+  type        = list(string)
+  default     = []
+}
+
+variable "default_share_level_permission" {
+  description = "Default share-level permission for AD-joined file shares. Supports principle of least privilege (ISO 27001 A.8.2)."
+  type        = string
+  default     = "StorageFileDataSmbShareElevatedContributor"
+  validation {
+    condition     = contains(["None", "StorageFileDataSmbShareReader", "StorageFileDataSmbShareContributor", "StorageFileDataSmbShareElevatedContributor"], var.default_share_level_permission)
+    error_message = "default_share_level_permission must be None, StorageFileDataSmbShareReader, StorageFileDataSmbShareContributor, or StorageFileDataSmbShareElevatedContributor."
+  }
+}
+
+variable "log_analytics_retention_days" {
+  description = "Retention period in days for the Log Analytics Workspace. ISO 27001 A.8.15 recommends at least 365 days for audit log retention."
+  type        = number
+  default     = 90
+  validation {
+    condition     = var.log_analytics_retention_days >= 30 && var.log_analytics_retention_days <= 730
+    error_message = "log_analytics_retention_days must be between 30 and 730."
+  }
+}
+
+variable "backup_vault_storage_mode_type" {
+  description = "Storage replication type for the Recovery Services Vault. Use GeoRedundant together with backup_vault_cross_region_restore_enabled = true for cross-region DR."
+  type        = string
+  default     = "ZoneRedundant"
+  validation {
+    condition     = contains(["LocallyRedundant", "ZoneRedundant", "GeoRedundant"], var.backup_vault_storage_mode_type)
+    error_message = "backup_vault_storage_mode_type must be LocallyRedundant, ZoneRedundant, or GeoRedundant."
+  }
+}
+
+variable "backup_vault_public_network_access_enabled" {
+  description = "Whether to allow public network access to the Recovery Services Vault. Set to true if access via the Azure Portal or public internet is required (e.g., for on-demand backup/restore operations through the portal UI)."
+  type        = bool
+  default     = false
+}
+
+variable "backup_vault_cross_region_restore_enabled" {
+  description = "Whether to enable cross-region restore on the Recovery Services Vault. Requires backup_vault_storage_mode_type = GeoRedundant."
+  type        = bool
+  default     = false
+}

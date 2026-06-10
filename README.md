@@ -94,6 +94,24 @@ soft_delete_retention_days = 14
 enable_sensitive_data_discovery = true
 public_network_access_enabled = false
 ip_rules = []
+storage_account_subnet_ids = []
+
+# AD share-level permission (ISO 27001 A.8.2 — principle of least privilege)
+default_share_level_permission = "StorageFileDataSmbShareElevatedContributor"
+
+# Log Analytics retention (ISO 27001 A.8.15 recommends >= 365 days for audit logs)
+log_analytics_retention_days = 90
+
+# Recovery Services Vault settings
+backup_vault_storage_mode_type = "ZoneRedundant"  # Options: LocallyRedundant, ZoneRedundant, GeoRedundant
+
+# ISO 27001 recommendation: keep false to restrict vault access to private network only.
+# Set to true if you require access to the Recovery Services Vault via the Azure Portal
+# or public internet (e.g., for on-demand backup/restore operations through the portal UI).
+backup_vault_public_network_access_enabled = false
+
+# Set to true only when backup_vault_storage_mode_type = GeoRedundant
+backup_vault_cross_region_restore_enabled = false
 }
 ```
 <br>

@@ -13,3 +13,6 @@ gha-creds*.json
 tf_validate_*
 
 modules/README.md
+
+# Claude local memory (not for version control)
+.claude/memory/

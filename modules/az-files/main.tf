@@ -15,8 +15,7 @@ resource "azurerm_storage_account" "default" {
   network_rules {
     default_action = "Deny"
     bypass         = ["AzureServices", "Logging", "Metrics"]
-    # Only allow access from specific VNets via private endpoint
-    virtual_network_subnet_ids = [] # Empty since using private endpoint
+    virtual_network_subnet_ids = var.storage_account_subnet_ids
     ip_rules                   = var.ip_rules
   }
 
@@ -38,7 +37,7 @@ resource "azurerm_storage_account" "default" {
     for_each = var.ad_storage_sid != null ? [1] : []
     content {
       directory_type                 = "AD"
-      default_share_level_permission = "StorageFileDataSmbShareElevatedContributor"
+      default_share_level_permission = var.default_share_level_permission
       active_directory {
         domain_guid         = var.ad_domain_guid
         domain_name         = var.ad_domain_name
@@ -111,13 +110,19 @@ resource "azurerm_recovery_services_vault" "backup_vault" {
   resource_group_name           = var.az_files_storage_account_rg_name
   location                      = var.az_files_storage_account_rg_location
   sku                           = "Standard"
-  storage_mode_type             = "ZoneRedundant"
-  public_network_access_enabled = true
-  cross_region_restore_enabled  = false
+  storage_mode_type             = var.backup_vault_storage_mode_type
+  public_network_access_enabled = var.backup_vault_public_network_access_enabled
+  cross_region_restore_enabled  = var.backup_vault_cross_region_restore_enabled
   soft_delete_enabled           = true
-  # soft_delete_feature_state = "Enabled"
 
   tags = var.tags
+
+  lifecycle {
+    precondition {
+      condition     = !var.backup_vault_cross_region_restore_enabled || var.backup_vault_storage_mode_type == "GeoRedundant"
+      error_message = "backup_vault_cross_region_restore_enabled = true requires backup_vault_storage_mode_type = GeoRedundant."
+    }
+  }
 }
 
 resource "azurerm_backup_policy_file_share" "daily_backup" {
@@ -159,7 +164,7 @@ resource "azurerm_log_analytics_workspace" "storage_logs" {
   location            = var.az_files_storage_account_rg_location
   resource_group_name = var.az_files_storage_account_rg_name
   sku                 = "PerGB2018"
-  retention_in_days   = 90 # Increase based on compliance needs
+  retention_in_days   = var.log_analytics_retention_days
   tags                = var.tags
 }
 
@@ -201,12 +206,8 @@ resource "azurerm_monitor_diagnostic_setting" "file_service" {
 resource "azurerm_security_center_subscription_pricing" "defender_storage" {
   tier          = "Standard"
   resource_type = "StorageAccounts"
-  extension {
-    additional_extension_properties = {}
-    name                            = "SensitiveDataDiscovery"
-  }
   lifecycle {
-    ignore_changes = [subplan] # To prevent unexpected changes from Azure
+    ignore_changes = [subplan]
   }
 }
 
