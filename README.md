@@ -96,6 +96,12 @@ public_network_access_enabled = false
 ip_rules = []
 storage_account_subnet_ids = []
 
+# ISO 27001 A.8.5 — disable storage account keys to force Azure AD / Kerberos auth only.
+# ⚠ Breaking if set to true after deployment: disables AzCopy --account-key, Portal Storage
+#   Explorer key-based access, and any legacy scripts using account keys.
+# Set to true explicitly if key-based tooling access is required.
+shared_access_key_enabled = false
+
 # AD share-level permission (ISO 27001 A.8.2 — principle of least privilege)
 default_share_level_permission = "StorageFileDataSmbShareElevatedContributor"
 
@@ -105,13 +111,21 @@ log_analytics_retention_days = 90
 # Recovery Services Vault settings
 backup_vault_storage_mode_type = "ZoneRedundant"  # Options: LocallyRedundant, ZoneRedundant, GeoRedundant
 
-# ISO 27001 recommendation: keep false to restrict vault access to private network only.
+# ISO 27001 A.8.20: keep false to restrict vault access to private network only.
 # Set to true if you require access to the Recovery Services Vault via the Azure Portal
 # or public internet (e.g., for on-demand backup/restore operations through the portal UI).
 backup_vault_public_network_access_enabled = false
 
 # Set to true only when backup_vault_storage_mode_type = GeoRedundant
 backup_vault_cross_region_restore_enabled = false
+
+# Defender for Storage — malware scan monthly cap in GB (0 = unlimited)
+malware_scanning_cap_gb_per_month = 5000
+
+# Alert thresholds — tune per environment to avoid alert fatigue (ISO 27001 A.8.16)
+alert_threshold_high_errors    = 100
+alert_threshold_high_deletes   = 50
+alert_threshold_auth_failures  = 20
 }
 ```
 <br>

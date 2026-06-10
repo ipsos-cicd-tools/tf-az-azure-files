@@ -164,6 +164,40 @@ variable "storage_account_subnet_ids" {
   default     = []
 }
 
+variable "shared_access_key_enabled" {
+  description = "Whether to allow access via storage account keys. Defaults to false (ISO 27001 A.8.5 — force Azure AD / Kerberos authentication only). Set to true if tooling requires key-based access (AzCopy --account-key, Azure Portal Storage Explorer, legacy scripts)."
+  type        = bool
+  default     = false
+}
+
+variable "alert_threshold_high_errors" {
+  description = "Transaction error count threshold that triggers the high-error-rate alert. Tune per environment to avoid alert fatigue (ISO 27001 A.8.16)."
+  type        = number
+  default     = 100
+}
+
+variable "alert_threshold_high_deletes" {
+  description = "Delete operation count threshold that triggers the high-delete-activity alert. Tune per environment (ISO 27001 A.8.16)."
+  type        = number
+  default     = 50
+}
+
+variable "alert_threshold_auth_failures" {
+  description = "Authentication failure count threshold that triggers the auth-failure alert. Tune per environment (ISO 27001 A.8.16)."
+  type        = number
+  default     = 20
+}
+
+variable "malware_scanning_cap_gb_per_month" {
+  description = "Monthly cap in GB for Defender for Storage malware scanning on upload. Set to 0 for unlimited (ISO 27001 A.8.12)."
+  type        = number
+  default     = 5000
+  validation {
+    condition     = var.malware_scanning_cap_gb_per_month >= 0
+    error_message = "malware_scanning_cap_gb_per_month must be 0 (unlimited) or a positive number."
+  }
+}
+
 variable "default_share_level_permission" {
   description = "Default share-level permission for AD-joined file shares. Supports principle of least privilege (ISO 27001 A.8.2)."
   type        = string
@@ -177,7 +211,7 @@ variable "default_share_level_permission" {
 variable "log_analytics_retention_days" {
   description = "Retention period in days for the Log Analytics Workspace. ISO 27001 A.8.15 recommends at least 365 days for audit log retention."
   type        = number
-  default     = 90
+  default     = 365
   validation {
     condition     = var.log_analytics_retention_days >= 30 && var.log_analytics_retention_days <= 730
     error_message = "log_analytics_retention_days must be between 30 and 730."
@@ -204,4 +238,32 @@ variable "backup_vault_cross_region_restore_enabled" {
   description = "Whether to enable cross-region restore on the Recovery Services Vault. Requires backup_vault_storage_mode_type = GeoRedundant."
   type        = bool
   default     = false
+}
+
+variable "storage_account_replication_type" {
+  description = "Replication type for the storage account. Use LRS in regions without availability zones, GRS for geo-redundancy independent of the backup vault."
+  type        = string
+  default     = "ZRS"
+  validation {
+    condition     = contains(["LRS", "ZRS", "GRS"], var.storage_account_replication_type)
+    error_message = "storage_account_replication_type must be LRS, ZRS, or GRS."
+  }
+}
+
+variable "enable_defender_subscription_pricing" {
+  description = "Whether this module manages the subscription-level Defender for Storage plan (azurerm_security_center_subscription_pricing). This is a subscription-scoped singleton — set to false if Defender for Storage is already enabled by another Terraform configuration, another instance of this module, or Azure Policy, to avoid state conflicts."
+  type        = bool
+  default     = true
+}
+
+variable "defender_override_subscription_settings_enabled" {
+  description = "Whether the per-storage-account Defender settings (malware scanning cap, sensitive data discovery) override the subscription-level Defender policy. Keep true to guarantee this module's security posture applies regardless of subscription defaults (ISO 27001 A.8.12)."
+  type        = bool
+  default     = true
+}
+
+variable "backup_timezone" {
+  description = "Timezone for the file share backup schedule (e.g. 'UTC', 'Romance Standard Time'). Uses Windows timezone names."
+  type        = string
+  default     = "UTC"
 }

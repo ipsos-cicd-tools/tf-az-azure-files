@@ -4,14 +4,19 @@ resource "azurerm_storage_account" "default" {
   location                      = var.az_files_storage_account_rg_location
   account_kind                  = "StorageV2"
   account_tier                  = "Standard"
-  account_replication_type      = "ZRS"
+  account_replication_type      = var.storage_account_replication_type
   tags                          = var.tags
   public_network_access_enabled = var.public_network_access_enabled
 
   access_tier                      = "Hot"
   min_tls_version                  = "TLS1_2"
+  https_traffic_only_enabled       = true
   large_file_share_enabled         = true
   cross_tenant_replication_enabled = false
+  shared_access_key_enabled        = var.shared_access_key_enabled
+  sftp_enabled                     = false
+  local_user_enabled               = false
+  allow_nested_items_to_be_public  = false
   network_rules {
     default_action = "Deny"
     bypass         = ["AzureServices", "Logging", "Metrics"]
@@ -32,6 +37,10 @@ resource "azurerm_storage_account" "default" {
     }
   }
   infrastructure_encryption_enabled = true
+
+  identity {
+    type = "SystemAssigned"
+  }
 
   dynamic "azure_files_authentication" {
     for_each = var.ad_storage_sid != null ? [1] : []
@@ -81,6 +90,13 @@ resource "azurerm_private_endpoint" "default_storage_pe" {
     name                           = "${var.az_files_storage_account_name}-privateendpoint"
     private_connection_resource_id = azurerm_storage_account.default.id
     subresource_names              = ["file"]
+  }
+
+  lifecycle {
+    precondition {
+      condition     = var.private_dns_zone_id != null
+      error_message = "private_dns_zone_id must be set — without it the private endpoint deploys but SMB clients cannot resolve the storage account FQDN, and mounts fail silently."
+    }
   }
 }
 
@@ -132,7 +148,7 @@ resource "azurerm_backup_policy_file_share" "daily_backup" {
   resource_group_name = var.az_files_storage_account_rg_name
   recovery_vault_name = azurerm_recovery_services_vault.backup_vault[0].name
 
-  timezone = "UTC"
+  timezone = var.backup_timezone
 
   backup {
     frequency = var.backup_policy.frequency
@@ -203,7 +219,11 @@ resource "azurerm_monitor_diagnostic_setting" "file_service" {
   }
 }
 
+# Subscription-scoped singleton — disable via enable_defender_subscription_pricing
+# when Defender for Storage is already managed elsewhere in the subscription.
 resource "azurerm_security_center_subscription_pricing" "defender_storage" {
+  count = var.enable_defender_subscription_pricing ? 1 : 0
+
   tier          = "Standard"
   resource_type = "StorageAccounts"
   lifecycle {
@@ -217,13 +237,12 @@ resource "azurerm_security_center_storage_defender" "default" {
 
   # Configure malware scanning
   malware_scanning_on_upload_enabled          = true
-  malware_scanning_on_upload_cap_gb_per_month = 5000
+  malware_scanning_on_upload_cap_gb_per_month = var.malware_scanning_cap_gb_per_month
 
   # Configure sensitive data discovery
   sensitive_data_discovery_enabled = var.enable_sensitive_data_discovery
 
-  # Override subscription-level settings (optional)
-  override_subscription_settings_enabled = false
+  override_subscription_settings_enabled = var.defender_override_subscription_settings_enabled
 }
 
 # Add action group for security alerts
@@ -256,7 +275,7 @@ resource "azurerm_monitor_metric_alert" "high_error_rate" {
     metric_name      = "Transactions"
     aggregation      = "Total"
     operator         = "GreaterThan"
-    threshold        = 100
+    threshold        = var.alert_threshold_high_errors
 
     dimension {
       name     = "ResponseType"
@@ -294,7 +313,7 @@ resource "azurerm_monitor_metric_alert" "high_delete_operations" {
     metric_name      = "Transactions"
     aggregation      = "Total"
     operator         = "GreaterThan"
-    threshold        = 50
+    threshold        = var.alert_threshold_high_deletes
 
     # Filter by delete operations
     dimension {
@@ -333,7 +352,7 @@ resource "azurerm_monitor_metric_alert" "auth_failures" {
     metric_name      = "Transactions"
     aggregation      = "Total"
     operator         = "GreaterThan"
-    threshold        = 20
+    threshold        = var.alert_threshold_auth_failures
 
     dimension {
       name     = "ResponseType"
@@ -347,4 +366,81 @@ resource "azurerm_monitor_metric_alert" "auth_failures" {
   }
 
   tags = var.tags
+}
+
+# Activity log alert — storage account deleted (ISO 27001 A.8.16 — control-plane monitoring)
+resource "azurerm_monitor_activity_log_alert" "delete_storage_account" {
+  name                = "${var.az_files_storage_account_name}-delete-sa-alert"
+  resource_group_name = var.az_files_storage_account_rg_name
+  scopes              = [azurerm_storage_account.default.id]
+  description         = "Alert when the storage account is deleted — critical security event"
+
+  criteria {
+    resource_id    = azurerm_storage_account.default.id
+    operation_name = "Microsoft.Storage/storageAccounts/delete"
+    category       = "Administrative"
+  }
+
+  action {
+    action_group_id = azurerm_monitor_action_group.storage_security_alerts.id
+  }
+
+  tags = var.tags
+}
+
+# Activity log alert — private endpoint deleted (ISO 27001 A.8.16)
+resource "azurerm_monitor_activity_log_alert" "delete_private_endpoint" {
+  name                = "${var.az_files_storage_account_name}-delete-pe-alert"
+  resource_group_name = var.az_files_storage_account_rg_name
+  scopes              = [azurerm_private_endpoint.default_storage_pe.id]
+  description         = "Alert when the storage private endpoint is deleted — network security event"
+
+  criteria {
+    resource_id    = azurerm_private_endpoint.default_storage_pe.id
+    operation_name = "Microsoft.Network/privateEndpoints/delete"
+    category       = "Administrative"
+  }
+
+  action {
+    action_group_id = azurerm_monitor_action_group.storage_security_alerts.id
+  }
+
+  tags = var.tags
+}
+
+# Activity log alert — storage account key regenerated (ISO 27001 A.8.16 — detects key re-enablement + rotation)
+resource "azurerm_monitor_activity_log_alert" "regenerate_storage_key" {
+  name                = "${var.az_files_storage_account_name}-key-regen-alert"
+  resource_group_name = var.az_files_storage_account_rg_name
+  scopes              = [azurerm_storage_account.default.id]
+  description         = "Alert when storage account access keys are regenerated — potential credential compromise"
+
+  criteria {
+    resource_id    = azurerm_storage_account.default.id
+    operation_name = "Microsoft.Storage/storageAccounts/regenerateKey/action"
+    category       = "Administrative"
+  }
+
+  action {
+    action_group_id = azurerm_monitor_action_group.storage_security_alerts.id
+  }
+
+  tags = var.tags
+}
+
+# Diagnostic settings for Recovery Services Vault (ISO 27001 A.8.15 — audit backup operations)
+resource "azurerm_monitor_diagnostic_setting" "backup_vault" {
+  count = var.enable_backup ? 1 : 0
+
+  name                       = "${var.az_files_storage_account_name}-vault-diagnostics"
+  target_resource_id         = azurerm_recovery_services_vault.backup_vault[0].id
+  log_analytics_workspace_id = azurerm_log_analytics_workspace.storage_logs.id
+
+  enabled_log { category = "AzureBackupReport" }
+  enabled_log { category = "CoreAzureBackup" }
+  enabled_log { category = "AddonAzureBackupJobs" }
+  enabled_log { category = "AddonAzureBackupAlerts" }
+  enabled_log { category = "AddonAzureBackupPolicy" }
+  enabled_log { category = "AddonAzureBackupStorage" }
+  enabled_log { category = "AddonAzureBackupProtectedInstance" }
 }
