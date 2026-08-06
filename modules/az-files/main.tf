@@ -7,6 +7,7 @@ resource "azurerm_storage_account" "default" {
   account_replication_type      = var.storage_account_replication_type
   tags                          = var.tags
   public_network_access_enabled = var.public_network_access_enabled
+  allowed_copy_scope            = var.allowed_copy_scope
 
   access_tier                      = "Hot"
   min_tls_version                  = "TLS1_2"
@@ -73,6 +74,8 @@ data "azurerm_resource_group" "current" {
 }
 
 resource "azurerm_private_endpoint" "default_storage_pe" {
+  count = var.enable_private_endpoint ? 1 : 0
+
   custom_network_interface_name = "${var.az_files_storage_account_name}-privateendpoint-nic"
   location                      = var.az_files_storage_account_rg_location
   name                          = "${var.az_files_storage_account_name}-privateendpoint"
@@ -101,6 +104,10 @@ resource "azurerm_private_endpoint" "default_storage_pe" {
       condition     = var.private_dns_zone_id != null
       error_message = "private_dns_zone_id must be set — without it the private endpoint deploys but SMB clients cannot resolve the storage account FQDN, and mounts fail silently."
     }
+    precondition {
+      condition     = var.subnet_id != null
+      error_message = "subnet_id must be set when enable_private_endpoint is true — the private endpoint has no subnet to deploy into."
+    }
   }
 }
 
@@ -114,10 +121,10 @@ resource "azurerm_management_lock" "storage_account_lock" {
 }
 
 resource "azurerm_management_lock" "private_endpoint_lock" {
-  count = var.enable_resource_locks ? 1 : 0
+  count = var.enable_resource_locks && var.enable_private_endpoint ? 1 : 0
 
   name       = "${var.az_files_storage_account_name}-pe-delete-lock"
-  scope      = azurerm_private_endpoint.default_storage_pe.id
+  scope      = azurerm_private_endpoint.default_storage_pe[0].id
   lock_level = "CanNotDelete"
   notes      = "Prevents accidental deletion of private endpoint"
 }
@@ -395,6 +402,8 @@ resource "azurerm_monitor_activity_log_alert" "delete_storage_account" {
 # Scoped to the resource group, not the PE itself, so the alert rule survives
 # the deletion it is meant to detect and catches any PE deletion in the RG.
 resource "azurerm_monitor_activity_log_alert" "delete_private_endpoint" {
+  count = var.enable_private_endpoint ? 1 : 0
+
   name                = "${var.az_files_storage_account_name}-delete-pe-alert"
   resource_group_name = var.az_files_storage_account_rg_name
   location            = "global"
@@ -449,4 +458,19 @@ resource "azurerm_monitor_diagnostic_setting" "backup_vault" {
   enabled_log { category = "AddonAzureBackupPolicy" }
   enabled_log { category = "AddonAzureBackupStorage" }
   enabled_log { category = "AddonAzureBackupProtectedInstance" }
+}
+
+# Share-level SMB RBAC — caller supplies group→role map via share_level_role_assignments.
+# Uses azuread_groups (plural): returns only object IDs, does NOT enumerate membership.
+# The singular azuread_group pulls the full members list — minutes for large dynamic groups.
+data "azuread_groups" "share_rbac" {
+  for_each      = var.share_level_role_assignments
+  display_names = [each.value.group_display_name]
+}
+
+resource "azurerm_role_assignment" "share_rbac" {
+  for_each             = var.share_level_role_assignments
+  scope                = azurerm_storage_account.default.id
+  role_definition_name = each.value.role_definition_name
+  principal_id         = data.azuread_groups.share_rbac[each.key].object_ids[0]
 }

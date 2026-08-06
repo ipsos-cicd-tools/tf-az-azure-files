@@ -18,13 +18,20 @@ variable "tags" {
   type        = map(string)
 }
 
+variable "enable_private_endpoint" {
+  description = "Whether to provision a private endpoint (and its optional management lock) for the file sub-resource. Defaults to true. Set to false for accounts reached via the VNet service-endpoint rule (storage_account_subnet_ids) or public access instead. When false, subnet_id and private_dns_zone_id are not required."
+  type        = bool
+  default     = true
+}
+
 variable "subnet_id" {
-  description = "A list of subnet IDs to associate with the Azure Files storage account"
+  description = "The ID of the subnet in which to create the private endpoint. Required only when enable_private_endpoint is true."
   type        = string
+  default     = null
 }
 
 variable "private_dns_zone_id" {
-  description = "The resource ID of the private DNS zone for file.core.windows.net"
+  description = "The resource ID of the private DNS zone for file.core.windows.net. Required only when enable_private_endpoint is true."
   type        = string
   default     = null
 }
@@ -62,19 +69,19 @@ variable "backup_policy" {
     frequency = "Daily"
     time      = "23:00"
     retention_daily = {
-      count = 30
+      count = 14
     }
     retention_weekly = {
-      count    = 12
+      count    = 4
       weekdays = ["Sunday"]
     }
     retention_monthly = {
-      count    = 12
+      count    = 3
       weekdays = ["Sunday"]
       weeks    = ["First"]
     }
     retention_yearly = {
-      count    = 7
+      count    = 3
       weekdays = ["Sunday"]
       weeks    = ["First"]
       months   = ["January"]
@@ -199,12 +206,43 @@ variable "malware_scanning_cap_gb_per_month" {
 }
 
 variable "default_share_level_permission" {
-  description = "Default share-level permission for AD-joined file shares. Supports principle of least privilege (ISO 27001 A.8.2)."
+  description = "Default share-level permission granted to ALL authenticated identities on the share. Defaults to Contributor: this is the sanctioned mechanism for an org-wide 'all employees' baseline, replacing a cloud-only/dynamic Entra 'all staff' group (which does NOT work for AD DS share-level RBAC — its SID isn't in the on-prem Kerberos ticket). NTFS ACLs still enforce per-folder access. Set to Reader or None for a stricter least-privilege posture (ISO 27001 A.8.2) and grant elevated access to specific groups via share_level_role_assignments."
   type        = string
-  default     = "StorageFileDataSmbShareElevatedContributor"
+  default     = "StorageFileDataSmbShareContributor"
   validation {
     condition     = contains(["None", "StorageFileDataSmbShareReader", "StorageFileDataSmbShareContributor", "StorageFileDataSmbShareElevatedContributor"], var.default_share_level_permission)
     error_message = "default_share_level_permission must be None, StorageFileDataSmbShareReader, StorageFileDataSmbShareContributor, or StorageFileDataSmbShareElevatedContributor."
+  }
+}
+
+variable "share_level_role_assignments" {
+  description = "Map of share-level SMB RBAC assignments. Each entry resolves an AAD group by display name and grants it the specified role on the storage account. Uses azuread_groups (plural) — returns only object IDs, does not enumerate membership, so plan times stay fast. IMPORTANT: for AD DS auth (directory_type = 'AD'), only on-prem AD security groups synced to Entra ID (Assigned membership) are honored — their SID must be present in the on-prem Kerberos ticket. Cloud-only/dynamic-membership groups are NOT matched and will silently fail. For an all-authenticated baseline, use default_share_level_permission instead of a dynamic 'all staff' group."
+  type = map(object({
+    group_display_name   = string
+    role_definition_name = string
+  }))
+  default = {}
+
+  validation {
+    condition = alltrue([
+      for v in values(var.share_level_role_assignments) :
+      contains([
+        "Storage File Data SMB Share Reader",
+        "Storage File Data SMB Share Contributor",
+        "Storage File Data SMB Share Elevated Contributor"
+      ], v.role_definition_name)
+    ])
+    error_message = "role_definition_name must be one of: 'Storage File Data SMB Share Reader', 'Storage File Data SMB Share Contributor', or 'Storage File Data SMB Share Elevated Contributor'."
+  }
+}
+
+variable "allowed_copy_scope" {
+  description = "Restrict object copy operations to the same AAD tenant ('AAD') or same private link network ('PrivateLink'). Null leaves the setting at Azure's default (unrestricted). Set to 'AAD' to prevent cross-tenant data exfiltration (ISO 27001 A.8.12)."
+  type        = string
+  default     = null
+  validation {
+    condition     = var.allowed_copy_scope == null || contains(["AAD", "PrivateLink"], var.allowed_copy_scope)
+    error_message = "allowed_copy_scope must be null, 'AAD', or 'PrivateLink'."
   }
 }
 
