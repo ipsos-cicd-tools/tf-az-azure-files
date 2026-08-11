@@ -99,16 +99,8 @@ resource "azurerm_private_endpoint" "default_storage_pe" {
     subresource_names              = ["file"]
   }
 
-  lifecycle {
-    precondition {
-      condition     = var.private_dns_zone_id != null
-      error_message = "private_dns_zone_id must be set — without it the private endpoint deploys but SMB clients cannot resolve the storage account FQDN, and mounts fail silently."
-    }
-    precondition {
-      condition     = var.subnet_id != null
-      error_message = "subnet_id must be set when enable_private_endpoint is true — the private endpoint has no subnet to deploy into."
-    }
-  }
+  # subnet_id / private_dns_zone_id null-checks now live as variable validations
+  # (see variables.tf), which fail earlier and with clearer, input-scoped errors.
 }
 
 resource "azurerm_management_lock" "storage_account_lock" {
@@ -472,5 +464,17 @@ resource "azurerm_role_assignment" "share_rbac" {
   for_each             = var.share_level_role_assignments
   scope                = azurerm_storage_account.default.id
   role_definition_name = each.value.role_definition_name
-  principal_id         = data.azuread_groups.share_rbac[each.key].object_ids[0]
+  # one() returns the single object ID, or raises an error if the display name
+  # matched more than one group — never silently picks an arbitrary group the way
+  # object_ids[0] did. The precondition below produces the actionable message first.
+  principal_id = one(data.azuread_groups.share_rbac[each.key].object_ids)
+
+  lifecycle {
+    precondition {
+      # Entra display names are not unique: a name can resolve to 0 or many groups.
+      # Require exactly one so the RBAC assignment targets an unambiguous principal.
+      condition     = length(data.azuread_groups.share_rbac[each.key].object_ids) == 1
+      error_message = "share_level_role_assignments[\"${each.key}\"]: group_display_name \"${each.value.group_display_name}\" resolved to ${length(data.azuread_groups.share_rbac[each.key].object_ids)} Entra groups; exactly one is required. Display names are not unique — use a name (or switch the map to object IDs) that matches a single group."
+    }
+  }
 }

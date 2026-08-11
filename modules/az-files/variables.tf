@@ -28,12 +28,27 @@ variable "subnet_id" {
   description = "The ID of the subnet in which to create the private endpoint. Required only when enable_private_endpoint is true."
   type        = string
   default     = null
+
+  validation {
+    # subnet_id defaults to null but the PE (enabled by default) has no subnet to
+    # deploy into without it. Fail at input time with an actionable message rather
+    # than deep inside the private endpoint resource.
+    condition     = !var.enable_private_endpoint || var.subnet_id != null
+    error_message = "subnet_id must be set when enable_private_endpoint is true (the default). Provide a subnet ID, or set enable_private_endpoint = false to reach the account via service-endpoint/public access."
+  }
 }
 
 variable "private_dns_zone_id" {
   description = "The resource ID of the private DNS zone for file.core.windows.net. Required only when enable_private_endpoint is true."
   type        = string
   default     = null
+
+  validation {
+    # Without the DNS zone the PE deploys but SMB clients cannot resolve the storage
+    # FQDN and mounts fail silently — reject the incomplete input up front.
+    condition     = !var.enable_private_endpoint || var.private_dns_zone_id != null
+    error_message = "private_dns_zone_id must be set when enable_private_endpoint is true (the default). Provide the file.core.windows.net private DNS zone ID, or set enable_private_endpoint = false."
+  }
 }
 
 variable "security_alert_email" {
