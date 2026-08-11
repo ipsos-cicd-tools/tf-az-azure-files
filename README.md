@@ -10,22 +10,22 @@ Optional Active Directory (Kerberos) integration for identity-based file access
 
 ### Networking
 
-Private endpoint for the file sub-resource, with a custom NIC name and private DNS zone group registration
-Public network access disabled by default; IP allowlisting available for exceptions
+Optional private endpoint for the file sub-resource — created when the `private_endpoint` object is provided — with a custom NIC name and private DNS zone group registration
+Public network access disabled by default; IP allowlisting and VNet service-endpoint subnets available for exceptions
 
 ### Backup
 
-Azure Recovery Services Vault (Zone-Redundant) with a configurable backup policy supporting daily, weekly, monthly, and yearly retention
+Optional Azure Recovery Services Vault (Zone-Redundant) with a configurable backup policy supporting daily, weekly, monthly, and yearly retention — created when the `backup` object is provided, or attach the policy to an existing vault via `existing_recovery_services_vault`
 
 ### Security
 
-Microsoft Defender for Storage with malware scanning (up to 5 TB/month) and optional sensitive data discovery
+Per-account Microsoft Defender for Storage (always on) with malware scanning (up to 5 TB/month) and optional sensitive data discovery; the subscription-level Defender plan is opt-in via `enable_defender_subscription_pricing`
 Soft delete for file shares (configurable retention, 1–365 days)
 Optional CanNotDelete resource locks on the storage account and private endpoint
 
 ### Monitoring & Alerting
 
-Log Analytics Workspace with 90-day retention
+Log Analytics Workspace with 365-day default retention — or bring your own via `existing_log_analytics_workspace_id`
 Diagnostic settings for storage account metrics (Transaction, Capacity) and file service audit logs (Read, Write, Delete)
 Monitor alerts for:
 High error rates (potential attack indicator)
@@ -35,7 +35,13 @@ Action group sending email alerts to a configurable security address
 
 ### Terraform Outputs
 
-`id` - Resource ID of the storage account
+- `id` — Resource ID of the storage account
+- `storage_account_name` — Name of the storage account (for az CLI, AzCopy, SDK)
+- `storage_account_principal_id` — Principal ID of the system-assigned managed identity
+- `private_endpoint_id` — Resource ID of the private endpoint (null when not created)
+- `log_analytics_workspace_id` — Workspace in use (created one, or `existing_log_analytics_workspace_id`)
+- `recovery_services_vault_id` — Vault created by the module (null when backup is off or a BYO vault is used)
+- `action_group_id` — Action group in use (created one, or `existing_action_group_id`)
 
 
 ## Module scope — what callers must provision themselves
@@ -43,116 +49,147 @@ Action group sending email alerts to a configurable security address
 This module provisions the storage account and surrounding infrastructure but **not the file shares**:
 
 - Create `azurerm_storage_share` resources in your calling configuration (share names are caller-specific).
-- To back up those shares, also create `azurerm_backup_protected_file_share` in the calling configuration, referencing the vault and policy this module creates (`enable_backup = true`).
-- `private_dns_zone_id` is **required in practice** — the module fails at plan time if it is null, because without DNS zone registration SMB clients cannot resolve the storage account and mounts fail silently.
+- To back up those shares, also create `azurerm_backup_protected_file_share` in the calling configuration, referencing the vault and policy this module creates (provide the `backup` object).
+- When you provide `private_endpoint`, both `subnet_id` and `private_dns_zone_id` are required — without DNS zone registration SMB clients cannot resolve the storage account and mounts fail silently.
 
 ## Compatibility
-Any compatability concerns go here
 
-## Useage 
-More specific useage examples can be found in the ***modules*** folder under the corresponding module name
+- Terraform `>= 1.9.0`
+- azurerm provider `>= 4.3.0, < 5.0.0` (pinned to 4.x)
+- azuread provider `>= 2.0.0`
 
-```
-module "module_name" {
-source  = "git::https://github.com/ipsos-cicd-tools/tf-az-azure-files//modules/az-files?ref=<version number>"
+> **Upgrading from v1.x?** The input interface changed (flat `subnet_id`/`backup_policy`/`ad_*` were grouped into the `private_endpoint`/`backup`/`active_directory` objects, and backup + subscription Defender are now opt-in). See `modules/az-files/MIGRATION.md`.
 
-## Required Variables
+## Usage
 
-az_files_storage_account_name  = 
-az_files_storage_account_rg_name  = 
-az_files_storage_account_rg_location  = 
-tags =
-subnet_id =
-security_alert_email =
+Consume the module by Git source, pinned to a released version tag. Optional features are created
+based on the **presence of their config object** (`private_endpoint`, `backup`, `active_directory`);
+`existing_*` inputs let you reuse externally-created resources instead of creating new ones.
 
-## Optional Variables (default values shown)
+### Minimal example
 
-private_dns_zone_id = null
-backup_policy = {
-    frequency = "Daily"
-    time      = "23:00"
-    retention_daily = {
-      count = 30
-    }
-    retention_weekly = {
-      count    = 12
-      weekdays = ["Sunday"]
-    }
-    retention_monthly = {
-      count    = 12
-      weekdays = ["Sunday"]
-      weeks    = ["First"]
-    }
-    retention_yearly = {
-      count    = 7
-      weekdays = ["Sunday"]
-      weeks    = ["First"]
-      months   = ["January"]
-    }
-  }
-ad_domain_name = null
-ad_domain_guid = null
-ad_domain_sid = null
-ad_forest_name = null
-ad_netbios_domain_name = null
-ad_storage_sid = null
-enable_backup = true
-enable_resource_locks = true
-soft_delete_retention_days = 14
-enable_sensitive_data_discovery = true
-public_network_access_enabled = false
-ip_rules = []
-storage_account_subnet_ids = []
+```hcl
+module "az_files" {
+  source = "git::https://github.com/ipsos-cicd-tools/tf-az-azure-files//modules/az-files?ref=2.0.0"
 
-# ISO 27001 A.8.5 — disable storage account keys to force Azure AD / Kerberos auth only.
-# ⚠ Breaking if set to true after deployment: disables AzCopy --account-key, Portal Storage
-#   Explorer key-based access, and any legacy scripts using account keys.
-# Set to true explicitly if key-based tooling access is required.
-shared_access_key_enabled = false
-
-# AD share-level permission (ISO 27001 A.8.2 — principle of least privilege)
-default_share_level_permission = "StorageFileDataSmbShareElevatedContributor"
-
-# Log Analytics retention (ISO 27001 A.8.15 — 365-day default for audit log compliance)
-log_analytics_retention_days = 365
-
-# Storage account replication. Use LRS in regions without availability zones,
-# GRS for geo-redundancy independent of the backup vault.
-storage_account_replication_type = "ZRS"  # Options: LRS, ZRS, GRS
-
-# Recovery Services Vault settings
-backup_vault_storage_mode_type = "ZoneRedundant"  # Options: LocallyRedundant, ZoneRedundant, GeoRedundant
-
-# ISO 27001 A.8.20: keep false to restrict vault access to private network only.
-# Set to true if you require access to the Recovery Services Vault via the Azure Portal
-# or public internet (e.g., for on-demand backup/restore operations through the portal UI).
-backup_vault_public_network_access_enabled = false
-
-# Set to true only when backup_vault_storage_mode_type = GeoRedundant
-backup_vault_cross_region_restore_enabled = false
-
-# Defender for Storage — malware scan monthly cap in GB (0 = unlimited)
-malware_scanning_cap_gb_per_month = 5000
-
-# ⚠ The subscription-level Defender for Storage plan is a SUBSCRIPTION-SCOPED SINGLETON.
-# Set to false if Defender for Storage is already enabled by another Terraform
-# configuration, another instance of this module in the same subscription, or Azure
-# Policy — otherwise the deployments will conflict over the same resource.
-enable_defender_subscription_pricing = true
-
-# Keep true so this module's malware scanning / data discovery settings apply
-# regardless of the subscription-level Defender policy (ISO 27001 A.8.12).
-defender_override_subscription_settings_enabled = true
-
-# Backup schedule timezone (Windows timezone names, e.g. "Romance Standard Time")
-backup_timezone = "UTC"
-
-# Alert thresholds — tune per environment to avoid alert fatigue (ISO 27001 A.8.16)
-alert_threshold_high_errors    = 100
-alert_threshold_high_deletes   = 50
-alert_threshold_auth_failures  = 20
+  az_files_storage_account_name        = "azemeaukfs01"
+  az_files_storage_account_rg_name     = "rg-uk-files"
+  az_files_storage_account_rg_location = "uksouth"
+  tags                                 = { environment = "prod", owner = "platform-team" }
+  security_alert_email                 = "secops@example.com"
 }
 ```
+
+This creates the storage account plus the always-on baseline (per-account Defender, Log Analytics
+workspace, diagnostics, action group, metric/activity-log alerts). Private endpoint, backup, and
+AD DS are **not** created unless you supply their config objects.
+
+### Full example — every variable with sample values
+
+```hcl
+module "az_files" {
+  source = "git::https://github.com/ipsos-cicd-tools/tf-az-azure-files//modules/az-files?ref=2.0.0"
+
+  # ---- Required ----
+  az_files_storage_account_name        = "azemeaukfs01"
+  az_files_storage_account_rg_name     = "rg-uk-files"
+  az_files_storage_account_rg_location = "uksouth"
+  tags = {
+    environment = "prod"
+    costcenter  = "12345"
+    owner       = "platform-team"
+  }
+  # Required unless existing_action_group_id is set (see BYO below)
+  security_alert_email = "secops@example.com"
+
+  # ---- Optional features (created only when the object is provided) ----
+
+  # Private endpoint (recommended for prod). Omit to skip.
+  private_endpoint = {
+    subnet_id           = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-network/providers/Microsoft.Network/virtualNetworks/vnet-uk/subnets/snet-files"
+    private_dns_zone_id = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-dns/providers/Microsoft.Network/privateDnsZones/privatelink.file.core.windows.net"
+  }
+
+  # On-prem AD DS (SMB Kerberos). Omit for no AD integration. All six fields required together.
+  active_directory = {
+    domain_name         = "corp.example.com"
+    domain_guid         = "11111111-2222-3333-4444-555555555555"
+    domain_sid          = "S-1-5-21-1111111111-2222222222-3333333333"
+    forest_name         = "corp.example.com"
+    netbios_domain_name = "CORP"
+    storage_sid         = "S-1-5-21-1111111111-2222222222-3333333333-4444" # use the DEPLOYED SA's SID
+  }
+
+  # Azure Backup. `backup = {}` uses the hardened defaults below. Omit entirely to skip backup.
+  # Every field is optional; values shown are the module defaults.
+  backup = {
+    policy = {
+      timezone          = "GMT Standard Time"
+      frequency         = "Daily"
+      time              = "23:00"
+      retention_daily   = { count = 14 }
+      retention_weekly  = { count = 4, weekdays = ["Sunday"] }
+      retention_monthly = { count = 3, weekdays = ["Sunday"], weeks = ["First"] }
+      retention_yearly  = { count = 3, weekdays = ["Sunday"], weeks = ["First"], months = ["January"] }
+    }
+    vault = {
+      storage_mode_type             = "ZoneRedundant" # LocallyRedundant | ZoneRedundant | GeoRedundant
+      public_network_access_enabled = false
+      cross_region_restore_enabled  = false           # requires storage_mode_type = GeoRedundant
+    }
+  }
+
+  # ---- Bring-your-own: reuse externally-created resources (skip creation) ----
+  existing_log_analytics_workspace_id = null # e.g. "/subscriptions/.../workspaces/central-logs"
+  existing_action_group_id            = null # e.g. "/subscriptions/.../actionGroups/central-sec"
+  existing_recovery_services_vault    = null # e.g. { name = "central-rsv", resource_group_name = "rg-backup" }
+
+  # ---- Tri-state overrides (null = auto from presence, true = force on, false = force off) ----
+  enable_private_endpoint = null
+  enable_backup           = null
+
+  # Subscription-scoped Defender plan (singleton). Opt-in — leave false when another
+  # config/module/Azure Policy already manages it. Per-account Defender is always on.
+  enable_defender_subscription_pricing = false
+
+  # ---- Security / posture toggles (defaults shown) ----
+  enable_resource_locks                           = true
+  enable_sensitive_data_discovery                 = true
+  defender_override_subscription_settings_enabled = true
+  public_network_access_enabled                   = false
+  shared_access_key_enabled                       = false   # ⚠ true breaks Azure AD/Kerberos-only posture (allows account keys)
+  ip_rules                                        = []       # e.g. ["203.0.113.10"]
+  storage_account_subnet_ids                      = []       # service-endpoint subnets; needs Microsoft.Storage SE + vnet >= 1.0.5
+  allowed_copy_scope                              = "AAD"    # null | "AAD" | "PrivateLink"
+  storage_account_replication_type                = "ZRS"    # LRS | ZRS | GRS
+  soft_delete_retention_days                      = 14       # 1–365
+
+  # ---- Share-level SMB RBAC ----
+  # Baseline permission for ALL authenticated identities (org-wide; NTFS ACLs refine per-folder).
+  default_share_level_permission = "StorageFileDataSmbShareContributor" # None | ...Reader | ...Contributor | ...ElevatedContributor
+  # Grant specific groups a role. Each display name must resolve to EXACTLY one Entra group.
+  share_level_role_assignments = {
+    admins = {
+      group_display_name   = "az-uk-azfiles-admins"
+      role_definition_name = "Storage File Data SMB Share Elevated Contributor"
+    }
+    users = {
+      group_display_name   = "MDM-USR-GB-United_Kingdom-Users"
+      role_definition_name = "Storage File Data SMB Share Contributor"
+    }
+  }
+
+  # ---- Monitoring thresholds & Defender cap (defaults shown) ----
+  log_analytics_retention_days      = 365  # 30–730 (only when the module creates its own workspace)
+  alert_threshold_high_errors       = 100
+  alert_threshold_high_deletes      = 50
+  alert_threshold_auth_failures     = 20
+  malware_scanning_cap_gb_per_month = 5000 # 0 = unlimited
+}
+```
+
+> Per-variable reference documentation (auto-generated by terraform-docs) lives in
+> [`modules/az-files/README.md`](modules/az-files/README.md).
 <br>
 <br>
 <br>
