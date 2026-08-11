@@ -24,7 +24,7 @@ content: |-
       {{- if eq $path_slice_counter 2 }}
         {{- $path_name := . }}
   module "{{ $path_name }}" {
-    source  = "git::https://github.com/ipsos-cicd-tools/<repo name>//modules/{{ $path_name }}?ref=<version number>"
+    source  = "git::https://github.com/ipsos-cicd-tools/tf-az-azure-files//modules/{{ $path_name }}?ref=<version number>"
         {{- end }}
       {{- end }}
     {{- end }}

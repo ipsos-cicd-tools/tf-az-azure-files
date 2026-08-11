@@ -14,8 +14,8 @@ output "storage_account_principal_id" {
 }
 
 output "private_endpoint_id" {
-  description = "Resource ID of the file storage private endpoint."
-  value       = azurerm_private_endpoint.default_storage_pe.id
+  description = "Resource ID of the file storage private endpoint. Null when enable_private_endpoint is false."
+  value       = one(azurerm_private_endpoint.default_storage_pe[*].id)
 }
 
 output "log_analytics_workspace_id" {
