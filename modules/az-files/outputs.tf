@@ -14,11 +14,21 @@ output "storage_account_principal_id" {
 }
 
 output "private_endpoint_id" {
-  description = "Resource ID of the file storage private endpoint. Null when enable_private_endpoint is false."
+  description = "Resource ID of the file storage private endpoint. Null when no private endpoint is created."
   value       = one(azurerm_private_endpoint.default_storage_pe[*].id)
 }
 
 output "log_analytics_workspace_id" {
-  description = "Resource ID of the Log Analytics Workspace. Use this to add additional diagnostic sinks from the calling module."
-  value       = azurerm_log_analytics_workspace.storage_logs.id
+  description = "Resource ID of the Log Analytics Workspace in use — the workspace created by this module, or existing_log_analytics_workspace_id when supplied. Use to add additional diagnostic sinks from the calling module."
+  value       = local.log_analytics_id
+}
+
+output "recovery_services_vault_id" {
+  description = "Resource ID of the Recovery Services vault created by this module. Null when backup is disabled or an existing vault (existing_recovery_services_vault) is used."
+  value       = one(azurerm_recovery_services_vault.backup_vault[*].id)
+}
+
+output "action_group_id" {
+  description = "Resource ID of the Monitor Action Group in use for security alerts — the one created by this module, or existing_action_group_id when supplied."
+  value       = local.action_group_id
 }
