@@ -1,3 +1,51 @@
+###############################################################################
+# Resolved creation flags & bring-your-own wiring.
+#
+# create_* = whether THIS module creates the resource.
+# *_id / *_name = the identifier dependents should use, whether the resource was
+# created here or supplied via an existing_* input.
+###############################################################################
+locals {
+  # Private endpoint: auto from presence of var.private_endpoint, override via flag.
+  create_private_endpoint = coalesce(var.enable_private_endpoint, var.private_endpoint != null)
+
+  # Log Analytics: create our own unless an existing workspace ID was supplied.
+  create_log_analytics = var.existing_log_analytics_workspace_id == null
+  log_analytics_id     = coalesce(var.existing_log_analytics_workspace_id, one(azurerm_log_analytics_workspace.storage_logs[*].id))
+
+  # Action group: create our own unless an existing action group ID was supplied.
+  create_action_group = var.existing_action_group_id == null
+  action_group_id     = coalesce(var.existing_action_group_id, one(azurerm_monitor_action_group.storage_security_alerts[*].id))
+
+  # Backup: auto from presence of var.backup, override via flag. Create a vault
+  # only when backup is wanted AND no existing vault was supplied.
+  create_backup = coalesce(var.enable_backup, var.backup != null)
+  create_vault  = local.create_backup && var.existing_recovery_services_vault == null
+
+  # Effective backup config — falls back to the module's hardened defaults when
+  # backup is forced on (enable_backup = true) without an explicit var.backup.
+  backup = var.backup != null ? var.backup : {
+    policy = {
+      timezone          = "UTC"
+      frequency         = "Daily"
+      time              = "23:00"
+      retention_daily   = { count = 14 }
+      retention_weekly  = { count = 4, weekdays = ["Sunday"] }
+      retention_monthly = { count = 3, weekdays = ["Sunday"], weeks = ["First"] }
+      retention_yearly  = { count = 3, weekdays = ["Sunday"], weeks = ["First"], months = ["January"] }
+    }
+    vault = {
+      storage_mode_type             = "ZoneRedundant"
+      public_network_access_enabled = false
+      cross_region_restore_enabled  = false
+    }
+  }
+
+  # Vault name/RG the backup policy attaches to (created vault or existing one).
+  vault_name = var.existing_recovery_services_vault != null ? var.existing_recovery_services_vault.name : one(azurerm_recovery_services_vault.backup_vault[*].name)
+  vault_rg   = var.existing_recovery_services_vault != null ? coalesce(var.existing_recovery_services_vault.resource_group_name, var.az_files_storage_account_rg_name) : var.az_files_storage_account_rg_name
+}
+
 resource "azurerm_storage_account" "default" {
   name                          = var.az_files_storage_account_name
   resource_group_name           = var.az_files_storage_account_rg_name
@@ -43,18 +91,19 @@ resource "azurerm_storage_account" "default" {
     type = "SystemAssigned"
   }
 
+  # AD DS integration is created only when var.active_directory is supplied.
   dynamic "azure_files_authentication" {
-    for_each = var.ad_storage_sid != null ? [1] : []
+    for_each = var.active_directory != null ? [1] : []
     content {
       directory_type                 = "AD"
       default_share_level_permission = var.default_share_level_permission
       active_directory {
-        domain_guid         = var.ad_domain_guid
-        domain_name         = var.ad_domain_name
-        domain_sid          = var.ad_domain_sid
-        forest_name         = var.ad_forest_name
-        netbios_domain_name = var.ad_netbios_domain_name
-        storage_sid         = var.ad_storage_sid
+        domain_guid         = var.active_directory.domain_guid
+        domain_name         = var.active_directory.domain_name
+        domain_sid          = var.active_directory.domain_sid
+        forest_name         = var.active_directory.forest_name
+        netbios_domain_name = var.active_directory.netbios_domain_name
+        storage_sid         = var.active_directory.storage_sid
       }
     }
   }
@@ -74,23 +123,17 @@ data "azurerm_resource_group" "current" {
 }
 
 resource "azurerm_private_endpoint" "default_storage_pe" {
-  count = var.enable_private_endpoint ? 1 : 0
+  count = local.create_private_endpoint ? 1 : 0
 
   custom_network_interface_name = "${var.az_files_storage_account_name}-privateendpoint-nic"
   location                      = var.az_files_storage_account_rg_location
   name                          = "${var.az_files_storage_account_name}-privateendpoint"
   resource_group_name           = var.az_files_storage_account_rg_name
-  subnet_id                     = var.subnet_id
+  subnet_id                     = var.private_endpoint.subnet_id
   tags                          = var.tags
-  #   ip_configuration {
-  #     member_name        = "file"
-  #     name               = "${var.az_files_storage_account_name}-pe-ip"
-  #     private_ip_address = "172.22.145.4"
-  #     subresource_name   = "file"
-  #   }
   private_dns_zone_group {
     name                 = "default"
-    private_dns_zone_ids = [var.private_dns_zone_id]
+    private_dns_zone_ids = [var.private_endpoint.private_dns_zone_id]
   }
   private_service_connection {
     is_manual_connection           = false
@@ -98,9 +141,6 @@ resource "azurerm_private_endpoint" "default_storage_pe" {
     private_connection_resource_id = azurerm_storage_account.default.id
     subresource_names              = ["file"]
   }
-
-  # subnet_id / private_dns_zone_id null-checks now live as variable validations
-  # (see variables.tf), which fail earlier and with clearer, input-scoped errors.
 }
 
 resource "azurerm_management_lock" "storage_account_lock" {
@@ -113,7 +153,7 @@ resource "azurerm_management_lock" "storage_account_lock" {
 }
 
 resource "azurerm_management_lock" "private_endpoint_lock" {
-  count = var.enable_resource_locks && var.enable_private_endpoint ? 1 : 0
+  count = var.enable_resource_locks && local.create_private_endpoint ? 1 : 0
 
   name       = "${var.az_files_storage_account_name}-pe-delete-lock"
   scope      = azurerm_private_endpoint.default_storage_pe[0].id
@@ -123,63 +163,58 @@ resource "azurerm_management_lock" "private_endpoint_lock" {
 
 # Enable Azure Backup for Azure Files
 resource "azurerm_recovery_services_vault" "backup_vault" {
-  count = var.enable_backup ? 1 : 0
+  count = local.create_vault ? 1 : 0
 
   name                          = "${var.az_files_storage_account_name}-vault"
   resource_group_name           = var.az_files_storage_account_rg_name
   location                      = var.az_files_storage_account_rg_location
   sku                           = "Standard"
-  storage_mode_type             = var.backup_vault_storage_mode_type
-  public_network_access_enabled = var.backup_vault_public_network_access_enabled
-  cross_region_restore_enabled  = var.backup_vault_cross_region_restore_enabled
+  storage_mode_type             = local.backup.vault.storage_mode_type
+  public_network_access_enabled = local.backup.vault.public_network_access_enabled
+  cross_region_restore_enabled  = local.backup.vault.cross_region_restore_enabled
   # soft delete is always on per Azure's secure-by-default policy;
   # the soft_delete_enabled argument is deprecated and removed in azurerm v5
 
   tags = var.tags
-
-  lifecycle {
-    precondition {
-      condition     = !var.backup_vault_cross_region_restore_enabled || var.backup_vault_storage_mode_type == "GeoRedundant"
-      error_message = "backup_vault_cross_region_restore_enabled = true requires backup_vault_storage_mode_type = GeoRedundant."
-    }
-  }
 }
 
 resource "azurerm_backup_policy_file_share" "daily_backup" {
-  count = var.enable_backup ? 1 : 0
+  count = local.create_backup ? 1 : 0
 
   name                = "${var.az_files_storage_account_name}-backup-policy"
-  resource_group_name = var.az_files_storage_account_rg_name
-  recovery_vault_name = azurerm_recovery_services_vault.backup_vault[0].name
+  resource_group_name = local.vault_rg
+  recovery_vault_name = local.vault_name
 
-  timezone = var.backup_timezone
+  timezone = local.backup.policy.timezone
 
   backup {
-    frequency = var.backup_policy.frequency
-    time      = var.backup_policy.time
+    frequency = local.backup.policy.frequency
+    time      = local.backup.policy.time
   }
   retention_daily {
-    count = var.backup_policy.retention_daily.count
+    count = local.backup.policy.retention_daily.count
   }
   retention_weekly {
-    count    = var.backup_policy.retention_weekly.count
-    weekdays = var.backup_policy.retention_weekly.weekdays
+    count    = local.backup.policy.retention_weekly.count
+    weekdays = local.backup.policy.retention_weekly.weekdays
   }
   retention_monthly {
-    count    = var.backup_policy.retention_monthly.count
-    weekdays = var.backup_policy.retention_monthly.weekdays
-    weeks    = var.backup_policy.retention_monthly.weeks
+    count    = local.backup.policy.retention_monthly.count
+    weekdays = local.backup.policy.retention_monthly.weekdays
+    weeks    = local.backup.policy.retention_monthly.weeks
   }
   retention_yearly {
-    count    = var.backup_policy.retention_yearly.count
-    weekdays = var.backup_policy.retention_yearly.weekdays
-    weeks    = var.backup_policy.retention_yearly.weeks
-    months   = var.backup_policy.retention_yearly.months
+    count    = local.backup.policy.retention_yearly.count
+    weekdays = local.backup.policy.retention_yearly.weekdays
+    weeks    = local.backup.policy.retention_yearly.weeks
+    months   = local.backup.policy.retention_yearly.months
   }
 }
 
-# Create Log Analytics Workspace
+# Create Log Analytics Workspace (skipped when existing_log_analytics_workspace_id is set)
 resource "azurerm_log_analytics_workspace" "storage_logs" {
+  count = local.create_log_analytics ? 1 : 0
+
   name                = "${var.az_files_storage_account_name}-logs"
   location            = var.az_files_storage_account_rg_location
   resource_group_name = var.az_files_storage_account_rg_name
@@ -192,7 +227,7 @@ resource "azurerm_log_analytics_workspace" "storage_logs" {
 resource "azurerm_monitor_diagnostic_setting" "storage_account" {
   name                       = "${var.az_files_storage_account_name}-diagnostics"
   target_resource_id         = azurerm_storage_account.default.id
-  log_analytics_workspace_id = azurerm_log_analytics_workspace.storage_logs.id
+  log_analytics_workspace_id = local.log_analytics_id
   enabled_metric {
     category = "Transaction"
   }
@@ -205,7 +240,7 @@ resource "azurerm_monitor_diagnostic_setting" "storage_account" {
 resource "azurerm_monitor_diagnostic_setting" "file_service" {
   name                       = "${var.az_files_storage_account_name}-file-diagnostics"
   target_resource_id         = "${azurerm_storage_account.default.id}/fileServices/default"
-  log_analytics_workspace_id = azurerm_log_analytics_workspace.storage_logs.id
+  log_analytics_workspace_id = local.log_analytics_id
   enabled_log {
     category = "StorageRead"
   }
@@ -220,8 +255,8 @@ resource "azurerm_monitor_diagnostic_setting" "file_service" {
   }
 }
 
-# Subscription-scoped singleton — disable via enable_defender_subscription_pricing
-# when Defender for Storage is already managed elsewhere in the subscription.
+# Subscription-scoped singleton — opt-in via enable_defender_subscription_pricing.
+# Leave off when Defender for Storage is already managed elsewhere in the subscription.
 resource "azurerm_security_center_subscription_pricing" "defender_storage" {
   count = var.enable_defender_subscription_pricing ? 1 : 0
 
@@ -232,7 +267,7 @@ resource "azurerm_security_center_subscription_pricing" "defender_storage" {
   }
 }
 
-# Then configure per-storage account settings
+# Then configure per-storage account settings (always on)
 resource "azurerm_security_center_storage_defender" "default" {
   storage_account_id = azurerm_storage_account.default.id
 
@@ -246,8 +281,10 @@ resource "azurerm_security_center_storage_defender" "default" {
   override_subscription_settings_enabled = var.defender_override_subscription_settings_enabled
 }
 
-# Add action group for security alerts
+# Add action group for security alerts (skipped when existing_action_group_id is set)
 resource "azurerm_monitor_action_group" "storage_security_alerts" {
+  count = local.create_action_group ? 1 : 0
+
   name                = "${var.az_files_storage_account_name}-security-alerts"
   resource_group_name = var.az_files_storage_account_rg_name
   short_name          = "sec-alert"
@@ -293,7 +330,7 @@ resource "azurerm_monitor_metric_alert" "high_error_rate" {
   }
 
   action {
-    action_group_id = azurerm_monitor_action_group.storage_security_alerts.id
+    action_group_id = local.action_group_id
   }
 
   tags = var.tags
@@ -332,7 +369,7 @@ resource "azurerm_monitor_metric_alert" "high_delete_operations" {
   }
 
   action {
-    action_group_id = azurerm_monitor_action_group.storage_security_alerts.id
+    action_group_id = local.action_group_id
   }
 
   tags = var.tags
@@ -363,7 +400,7 @@ resource "azurerm_monitor_metric_alert" "auth_failures" {
   }
 
   action {
-    action_group_id = azurerm_monitor_action_group.storage_security_alerts.id
+    action_group_id = local.action_group_id
   }
 
   tags = var.tags
@@ -384,7 +421,7 @@ resource "azurerm_monitor_activity_log_alert" "delete_storage_account" {
   }
 
   action {
-    action_group_id = azurerm_monitor_action_group.storage_security_alerts.id
+    action_group_id = local.action_group_id
   }
 
   tags = var.tags
@@ -394,7 +431,7 @@ resource "azurerm_monitor_activity_log_alert" "delete_storage_account" {
 # Scoped to the resource group, not the PE itself, so the alert rule survives
 # the deletion it is meant to detect and catches any PE deletion in the RG.
 resource "azurerm_monitor_activity_log_alert" "delete_private_endpoint" {
-  count = var.enable_private_endpoint ? 1 : 0
+  count = local.create_private_endpoint ? 1 : 0
 
   name                = "${var.az_files_storage_account_name}-delete-pe-alert"
   resource_group_name = var.az_files_storage_account_rg_name
@@ -408,7 +445,7 @@ resource "azurerm_monitor_activity_log_alert" "delete_private_endpoint" {
   }
 
   action {
-    action_group_id = azurerm_monitor_action_group.storage_security_alerts.id
+    action_group_id = local.action_group_id
   }
 
   tags = var.tags
@@ -429,19 +466,20 @@ resource "azurerm_monitor_activity_log_alert" "regenerate_storage_key" {
   }
 
   action {
-    action_group_id = azurerm_monitor_action_group.storage_security_alerts.id
+    action_group_id = local.action_group_id
   }
 
   tags = var.tags
 }
 
-# Diagnostic settings for Recovery Services Vault (ISO 27001 A.8.15 — audit backup operations)
+# Diagnostic settings for Recovery Services Vault (ISO 27001 A.8.15 — audit backup operations).
+# Only when this module created the vault — we do not manage diagnostics on a BYO vault.
 resource "azurerm_monitor_diagnostic_setting" "backup_vault" {
-  count = var.enable_backup ? 1 : 0
+  count = local.create_vault ? 1 : 0
 
   name                       = "${var.az_files_storage_account_name}-vault-diagnostics"
   target_resource_id         = azurerm_recovery_services_vault.backup_vault[0].id
-  log_analytics_workspace_id = azurerm_log_analytics_workspace.storage_logs.id
+  log_analytics_workspace_id = local.log_analytics_id
 
   enabled_log { category = "AzureBackupReport" }
   enabled_log { category = "CoreAzureBackup" }
